@@ -1,10 +1,61 @@
 import json
 import zipfile
+from io import BytesIO
 
 import httpx
 
 from kptncook.models import Recipe
-from kptncook.tandoor import IMAGE_DOWNLOAD_TIMEOUT, TandoorExporter
+from kptncook.tandoor import (
+    IMAGE_DOWNLOAD_TIMEOUT,
+    TANDOOR_BULK_EXPORT_FILENAME,
+    TandoorExporter,
+)
+
+
+def _read_recipe_from_export_zip(zip_path, inner_name="recipe.zip"):
+    """Open outer zip, read inner recipe zip, return (payload, inner_namelist)."""
+    with zipfile.ZipFile(zip_path) as outer:
+        inner_bytes = outer.read(inner_name)
+    with zipfile.ZipFile(BytesIO(inner_bytes)) as inner:
+        payload = json.loads(inner.read("recipe.json").decode("utf-8"))
+        return payload, inner.namelist()
+
+
+def test_export_produces_single_bulk_zip(
+    full_recipe, minimal, mocker, tmp_path, monkeypatch
+):
+    exporter = TandoorExporter()
+    recipe1 = Recipe.model_validate(full_recipe)
+    recipe2 = Recipe.model_validate(minimal)
+    monkeypatch.chdir(tmp_path)
+    mocker.patch.object(
+        Recipe,
+        "get_image_url",
+        autospec=True,
+        return_value="https://example.com/cover.jpg",
+    )
+    mocker.patch(
+        "kptncook.tandoor.httpx.get",
+        return_value=mocker.Mock(content=b"image", raise_for_status=mocker.Mock()),
+    )
+
+    filenames = exporter.export(recipes=[recipe1, recipe2])
+
+    assert filenames == [TANDOOR_BULK_EXPORT_FILENAME]
+    zip_path = tmp_path / TANDOOR_BULK_EXPORT_FILENAME
+    assert zip_path.is_file()
+    with zipfile.ZipFile(zip_path) as bulk:
+        names = sorted(bulk.namelist())
+        assert len(names) == 2
+        assert all(n.endswith(".zip") for n in names)
+    payload, inner_names = _read_recipe_from_export_zip(zip_path, inner_name=names[0])
+    assert "name" in payload
+    assert set(inner_names) >= {"recipe.json"}
+
+
+def test_export_returns_empty_list_when_no_recipes():
+    exporter = TandoorExporter()
+    assert exporter.export(recipes=[]) == []
 
 
 def test_export_recipe_writes_zip_with_image(
@@ -28,13 +79,13 @@ def test_export_recipe_writes_zip_with_image(
 
     zip_path = tmp_path / filename
     assert zip_path.is_file()
-    with zipfile.ZipFile(zip_path) as zip_file:
-        assert set(zip_file.namelist()) == {"recipe.json", "image.jpg"}
-        payload = json.loads(zip_file.read("recipe.json").decode("utf-8"))
+    payload, inner_names = _read_recipe_from_export_zip(zip_path)
+    assert set(inner_names) == {"recipe.json", "image.jpg"}
     assert payload["name"] == recipe.localized_title.de
-    assert {"name": "kptncook"} in payload["keywords"]
-    assert {"name": "main_ingredient_pasta"} in payload["keywords"]
-    assert {"name": "Fish"} in payload["keywords"]
+    keyword_names = [k["name"] for k in payload["keywords"]]
+    assert "kptncook" in keyword_names
+    assert "main_ingredient_pasta" in keyword_names
+    assert "Fish" in keyword_names
     assert "working_time" in payload
     assert "waiting_time" in payload
     assert "prep_time" not in payload
@@ -73,9 +124,9 @@ def test_export_recipe_skips_missing_cover_image(
 
     zip_path = tmp_path / filename
     assert zip_path.is_file()
-    with zipfile.ZipFile(zip_path) as zip_file:
-        assert "recipe.json" in zip_file.namelist()
-        assert "image.jpg" not in zip_file.namelist()
+    _, inner_names = _read_recipe_from_export_zip(zip_path)
+    assert "recipe.json" in inner_names
+    assert "image.jpg" not in inner_names
 
 
 def test_export_recipe_skips_when_no_cover_image(
@@ -92,9 +143,9 @@ def test_export_recipe_skips_when_no_cover_image(
 
     zip_path = tmp_path / filename
     assert zip_path.is_file()
-    with zipfile.ZipFile(zip_path) as zip_file:
-        assert "recipe.json" in zip_file.namelist()
-        assert "image.jpg" not in zip_file.namelist()
+    _, inner_names = _read_recipe_from_export_zip(zip_path)
+    assert "recipe.json" in inner_names
+    assert "image.jpg" not in inner_names
     httpx_get.assert_not_called()
     get_image_url.assert_not_called()
 
@@ -122,13 +173,8 @@ def test_get_keywords_includes_active_tags_and_rtype(minimal):
     }
     recipe = Recipe.model_validate(recipe_data)
 
-    assert exporter.get_keywords(recipe) == [
-        {"name": "kptncook"},
-        {"name": "quick"},
-        {"name": "dinner"},
-        {"name": "Fish"},
-    ]
-    assert exporter.get_keywords(recipe).count({"name": "kptncook"}) == 1
+    assert exporter.get_keywords(recipe) == ["kptncook", "quick", "dinner", "Fish"]
+    assert exporter.get_keywords(recipe).count("kptncook") == 1
 
 
 def test_get_recipe_payload_uses_tandoor_time_fields(minimal):
@@ -203,8 +249,44 @@ def test_export_expands_timer_placeholders(minimal, mocker, tmp_path, monkeypatc
 
     filename = exporter.export_recipe(recipe=recipe)
 
-    with zipfile.ZipFile(tmp_path / filename) as zip_file:
-        payload = json.loads(zip_file.read("recipe.json").decode("utf-8"))
+    payload, _ = _read_recipe_from_export_zip(tmp_path / filename)
     instruction = payload["steps"][0]["instruction"]
     assert "15 Min." in instruction
     assert "<timer>" not in instruction
+
+
+def test_export_skips_step_ingredients_with_empty_name(
+    minimal, mocker, tmp_path, monkeypatch
+):
+    exporter = TandoorExporter()
+    recipe_data = {
+        **minimal,
+        "steps": [
+            {
+                "title": {"de": "Step with unresolved ingredients"},
+                "ingredients": [
+                    {"ingredientId": "abc123"},
+                    {"ingredientId": "def456", "ingredient": {}},
+                ],
+                "image": minimal["steps"][0]["image"],
+            }
+        ],
+    }
+    recipe = Recipe.model_validate(recipe_data)
+    monkeypatch.chdir(tmp_path)
+    mocker.patch.object(
+        Recipe,
+        "get_image_url",
+        autospec=True,
+        return_value="https://example.com/cover.jpg",
+    )
+    mocker.patch(
+        "kptncook.tandoor.httpx.get",
+        return_value=mocker.Mock(content=b"image", raise_for_status=mocker.Mock()),
+    )
+
+    filename = exporter.export_recipe(recipe=recipe)
+
+    payload, _ = _read_recipe_from_export_zip(tmp_path / filename)
+    step_ingredients = payload["steps"][0]["ingredients"]
+    assert step_ingredients == []
