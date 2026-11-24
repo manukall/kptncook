@@ -555,16 +555,26 @@ def export_recipes_to_paprika(_id: OptionalId = typer.Argument(None)):
 
 
 @app.command(name="export-recipes-to-tandoor")
-def export_recipes_to_tandoor(_id: OptionalId = typer.Argument(None)):
+def export_recipes_to_tandoor(
+    _id: OptionalId = typer.Argument(None),
+    budget_mib: int | None = typer.Option(
+        None,
+        "--budget-mib",
+        min=1,
+        help="Set separate limits of this many MiB each for cover downloads and the final ZIP (defaults: 100 and 256 MiB).",
+    ),
+):
     """
     Export one recipe or all recipes to Tandoor.
     """
-    result = _run_or_exit(export_recipes_to_tandoor_workflow, _id)
-    _print_repository_warnings(result.invalid_repository_entries)
-    rprint(
-        "\n The data was exported to '%s'. Open the export file with Tandoor.\n"
-        % ", ".join(result.filenames)
+    result = _run_or_exit(
+        export_recipes_to_tandoor_workflow, _id, budget_mib=budget_mib
     )
+    _print_repository_warnings(result.invalid_repository_entries)
+    if not result.filenames:
+        rprint("No recipes to export.")
+        return
+    rprint(f"Import '{result.filenames[0]}' with Tandoor's Default importer.")
 
 
 @app.command(name="export-recipes-to-markdown")

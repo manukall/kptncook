@@ -9,6 +9,7 @@ from zipfile import ZipFile
 import pytest
 import yaml
 
+from tandoor_archive import open_tandoor_recipe
 from kptncook.exporter_utils import move_to_free_target
 from kptncook.markdown_exporter import MarkdownExporter
 from kptncook.mealie import kptncook_to_mealie
@@ -95,7 +96,8 @@ def test_long_title_exports_remain_complete_and_do_not_clobber(
             with ZipFile(path) as archive:
                 assert archive.testzip() is None
                 if kind == "tandoor":
-                    payload = json.loads(archive.read("recipe.json"))
+                    with open_tandoor_recipe(path) as inner:
+                        payload = json.loads(inner.read("recipe.json"))
                 else:
                     [entry] = archive.namelist()
                     payload = json.loads(gzip.decompress(archive.read(entry)))

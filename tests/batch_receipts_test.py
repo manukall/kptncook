@@ -78,19 +78,39 @@ def recipes(minimal):
     ]
 
 
+def test_tandoor_staging_failure_leaves_batch_untouched(recipes, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    def refuse_staging(**kwargs):
+        raise PermissionError("synthetic staging failure")
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", refuse_staging)
+    with pytest.raises(BatchExportError) as caught:
+        TandoorExporter().export(recipes)
+
+    assert caught.value.failed_recipe_id == "archive"
+    assert (
+        caught.value.remaining_count == caught.value.unpublished_count == len(recipes)
+    )
+    assert caught.value.completed_paths == ()
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.parametrize("uncertain", [False, True])
 def test_tandoor_batch_receipts_and_cli(recipes, tmp_path, monkeypatch, uncertain):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(TandoorExporter, "get_cover_image_bytes", lambda *a, **kw: None)
     link = os.link
 
+    archive = tmp_path / "kptncook-tandoor-export.zip"
+
     def publish(src, dst):
-        if Path(dst).name == "Recipe_1.zip" and not uncertain:
+        if Path(dst) == archive and not uncertain:
             raise OSError("synthetic failure")
         link(src, dst)
 
     def sync(directory):
-        if uncertain and (tmp_path / "Recipe_1.zip").exists():
+        if uncertain and archive.exists():
             raise OSError("synthetic sync failure")
 
     monkeypatch.setattr(os, "link", publish)
@@ -98,7 +118,7 @@ def test_tandoor_batch_receipts_and_cli(recipes, tmp_path, monkeypatch, uncertai
     cli = importlib.import_module("kptncook.cli")
     errors = []
 
-    def run(recipe_id):
+    def run(recipe_id, *, budget_mib):
         try:
             TandoorExporter().export(recipes)
         except UserFacingError as exc:
@@ -108,14 +128,15 @@ def test_tandoor_batch_receipts_and_cli(recipes, tmp_path, monkeypatch, uncertai
     monkeypatch.setattr(cli, "export_recipes_to_tandoor_workflow", run)
     result = CliRunner().invoke(cli.app, ["export-recipes-to-tandoor"])
     assert result.exit_code == 1
-    assert result.output.count("Recipe_0.zip") == 1
+    assert archive.name in result.output
+    assert ("durability is uncertain" in result.output) is uncertain
     [error] = errors
-    assert error.completed_paths == (tmp_path / "Recipe_0.zip",)
-    assert error.failed_recipe_id == "synthetic-1"
-    assert error.remaining_count == 1
-    assert error.uncertain_paths == ((tmp_path / "Recipe_1.zip",) if uncertain else ())
-    assert (tmp_path / "Recipe_0.zip").exists()
-    assert not (tmp_path / "Recipe_2.zip").exists()
+    assert error.completed_paths == ()
+    assert error.failed_recipe_id == "archive"
+    assert error.remaining_count == 0
+    assert error.unpublished_count == len(recipes)
+    assert error.uncertain_paths == ((archive,) if uncertain else ())
+    assert list(tmp_path.glob("*.zip")) == ([archive] if uncertain else [])
     assert not list(tmp_path.glob(".kptncook-*"))
 
 

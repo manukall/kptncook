@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from kptncook import image_download
+from tandoor_archive import open_tandoor_recipe
 from kptncook.config import SettingsError, clear_settings_cache, get_settings
 from kptncook.image_origin import (
     DEFAULT_IMAGE_HOSTS,
@@ -251,7 +252,7 @@ def test_exports_keep_text_and_make_no_hostile_request(
         assert not payload["photo_data"]
     elif exporter == "tandoor":
         filename = TandoorExporter().export_recipe(recipe)
-        with ZipFile(filename) as archive:
+        with open_tandoor_recipe(filename) as archive:
             payload = json.loads(archive.read("recipe.json"))
             assert "image.jpg" not in archive.namelist()
         assert payload["steps"][0]["instruction"] == "Keep this step text"

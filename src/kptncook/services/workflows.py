@@ -27,6 +27,7 @@ from kptncook.api import (
 from kptncook.auth import InvalidTokenError
 from kptncook.config import get_settings
 from kptncook.env import ENV_PATH
+from kptncook.exporter_utils import ExportBudget
 from kptncook.http_errors import (
     UserFacingError,
     format_http_status_error,
@@ -848,7 +849,15 @@ def export_recipes_to_paprika(recipe_id: str | None) -> str:
     return export_recipes_to_paprika_result(recipe_id).filename
 
 
-def export_recipes_to_tandoor_result(recipe_id: str | None) -> TandoorExportResult:
+def export_recipes_to_tandoor_result(
+    recipe_id: str | None, *, budget_mib: int | None = None
+) -> TandoorExportResult:
+    budget = None
+    if budget_mib is not None:
+        if budget_mib < 1:
+            raise UserFacingError("The export budget must be at least 1 MiB.")
+        limit = budget_mib * 1024 * 1024
+        budget = ExportBudget(asset_limit=limit, output_limit=limit)
     repository_result = (
         load_recipe_from_repository_by_id(recipe_id)
         if recipe_id
@@ -861,13 +870,15 @@ def export_recipes_to_tandoor_result(recipe_id: str | None) -> TandoorExportResu
         if len(recipes) > 1:
             raise UserFacingError("More than one recipe found with that ID.")
     return TandoorExportResult(
-        filenames=TandoorExporter().export(recipes=recipes),
+        filenames=TandoorExporter().export(recipes=recipes, budget=budget),
         invalid_repository_entries=repository_result.invalid_entries,
     )
 
 
-def export_recipes_to_tandoor(recipe_id: str | None) -> list[str]:
-    return export_recipes_to_tandoor_result(recipe_id).filenames
+def export_recipes_to_tandoor(
+    recipe_id: str | None, *, budget_mib: int | None = None
+) -> list[str]:
+    return export_recipes_to_tandoor_result(recipe_id, budget_mib=budget_mib).filenames
 
 
 def export_recipes_to_markdown_result(

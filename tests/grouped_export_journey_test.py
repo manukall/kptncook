@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from mealie_organizer_lookup_test import FakeMealie
+from tandoor_archive import open_tandoor_recipe
 from kptncook.config import settings
 from kptncook.markdown_exporter import MarkdownExporter
 from kptncook.mealie import MealieApiClient, kptncook_to_mealie
@@ -160,19 +161,27 @@ def test_grouped_reference_fidelity_across_archive_and_file_exports(
         ]
 
     [filename] = TandoorExporter().export([recipe])
-    with ZipFile(filename) as archive:
+    with open_tandoor_recipe(filename) as archive:
         tandoor = json.loads(archive.read("recipe.json"))
     assert tandoor["servings"] == servings
-    headers = [item for item in tandoor["ingredients"] if item.get("is_header")]
-    assert headers == [
-        {"note": label, "is_header": True, "no_amount": True, "amount": 0}
-        for label in labels
-    ]
-    real = [item for item in tandoor["ingredients"] if not item.get("is_header")]
+    assert "ingredients" not in tandoor
+    ingredient_step, *cooking_steps = tandoor["steps"]
+    rows = ingredient_step["ingredients"]
+    assert [row["order"] for row in rows] == list(range(len(rows)))
+    headers = [item for item in rows if item.get("is_header")]
+    assert [row["note"] for row in headers] == labels
+    assert all(
+        row["food"] is None
+        and row["unit"] is None
+        and row["no_amount"]
+        and row["amount"] == 0
+        for row in headers
+    )
+    real = [item for item in rows if not item.get("is_header")]
     assert [
         (item["food"]["name"], item["amount"], item["unit"]["name"]) for item in real
     ] == expected_rows
-    for step, indices in zip(tandoor["steps"], [[0, 1], [4, 3]], strict=True):
+    for step, indices in zip(cooking_steps, [[0, 1], [4, 3]], strict=True):
         assert [
             (item["food"]["name"], item["amount"], item["unit"]["name"])
             for item in step["ingredients"]
@@ -196,7 +205,7 @@ def test_grouped_reference_fidelity_across_archive_and_file_exports(
     ] == expected_text
     texts = ["Salz und Öl mischen.", "Mehl und Zeste zugeben."]
     assert [step["text"] for step in mealie["recipe_instructions"]] == texts
-    assert [step["instruction"] for step in tandoor["steps"]] == texts
+    assert [step["instruction"] for step in cooking_steps] == texts
     assert paprika["directions"].splitlines() == texts
     for text in texts:
         assert f"- {text}" in body

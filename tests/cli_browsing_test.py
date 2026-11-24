@@ -245,7 +245,7 @@ def test_export_dispatch_and_output(mocker, format_name, recipe_id):
     warnings = [InvalidStoredRecipe(3, "synthetic-broken", "steps: Field required")]
     results = {
         "paprika": PaprikaExportResult("synthetic.paprikarecipes", warnings),
-        "tandoor": TandoorExportResult(["soup.zip", "salad.zip"], warnings),
+        "tandoor": TandoorExportResult(["kptncook-tandoor-export.zip"], warnings),
         "markdown": MarkdownExportResult(
             ["export_md/soup.md", "export_md/salad.md"], warnings
         ),
@@ -266,6 +266,8 @@ def test_export_dispatch_and_output(mocker, format_name, recipe_id):
     for name, workflow in workflows.items():
         if name == "markdown" and name == format_name:
             workflow.assert_called_once_with(recipe_id, 2)
+        elif name == "tandoor" and name == format_name:
+            workflow.assert_called_once_with(recipe_id, budget_mib=None)
         elif name == format_name:
             workflow.assert_called_once_with(recipe_id)
         else:
@@ -277,7 +279,7 @@ def test_export_dispatch_and_output(mocker, format_name, recipe_id):
         assert "synthetic.paprikarecipes" in result.output
         assert "Paprika App" in result.output
     elif format_name == "tandoor":
-        assert "soup.zip, salad.zip" in result.output
+        assert "kptncook-tandoor-export.zip" in result.output
         assert "Tandoor" in result.output
     else:
         assert "2 recipe(s) were exported as Markdown" in result.output

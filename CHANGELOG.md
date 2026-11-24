@@ -2,6 +2,11 @@ Unreleased
 ==========
 
 ### Fixes
+- Export a single uploadable ZIP for Tandoor's Default importer, with one
+  inner ZIP per recipe. Include recipe-wide ingredients and group headers in
+  an ordered step and keep quantities scaled to the exported servings.
+- Stream Tandoor exports and apply the output limit to the finished ZIP size.
+  Add `--budget-mib` for backups that need a higher cover-download or ZIP limit.
 - Skip empty recipe image responses and responses with invalid, oversized, or
   mismatched declared lengths while retaining the recipe text.
 - Connect directly to allowed recipe image hosts and ignore HTTPX proxy and CA

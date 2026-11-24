@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 from pydantic import ValidationError
 
+from tandoor_archive import open_tandoor_recipe
 from kptncook.exporter_utils import get_step_text, replace_timers_in_step
 from kptncook.models import Recipe
 from kptncook.repositories import RecipeRepository
@@ -140,7 +141,7 @@ def test_invalid_stored_numeric_recipe_never_reaches_export(
         exporter = getattr(workflows, f"{format.capitalize()}Exporter")
         calls = []
 
-        def export(*args, recipes):
+        def export(*args, recipes, budget=None):
             calls.extend(recipes)
             return [] if format != "paprika" else "empty"
 
@@ -184,7 +185,8 @@ def test_valid_whole_recipe_durations_across_adapters(minimal, prep, cook):
     assert Recipe.model_validate_json(recipe.model_dump_json(by_alias=True)) == recipe
     tandoor = TandoorExporter().get_recipe_payload(recipe)
     assert tandoor["working_time"] == prep
-    assert tandoor["waiting_time"] == cook
+    assert tandoor.get("waiting_time") == cook
+    assert ("waiting_time" in tandoor) is (cook is not None)
     mealie = kptncook_to_mealie(recipe, api_key="synthetic")
     assert mealie.prep_time == prep
     assert mealie.cook_time == cook
@@ -306,10 +308,12 @@ def test_finite_scaled_quantities_in_actual_export_payloads(
 
     expected = None if quantity is None else (0.3 if quantity == 0.1 else quantity * 3)
     [tandoor_path] = TandoorExporter().export([recipe])
-    with zipfile.ZipFile(tandoor_path) as archive:
+    with open_tandoor_recipe(tandoor_path) as archive:
         tandoor = strict_json(archive.read("recipe.json"))
-    assert tandoor["ingredients"][0].get("amount") == expected
-    assert tandoor["steps"][0]["ingredients"][0].get("amount") == expected
+    for step in tandoor["steps"]:
+        row = step["ingredients"][0]
+        assert row["amount"] == (expected or 0)
+        assert row["no_amount"] is (quantity is None)
     with zipfile.ZipFile(PaprikaExporter().export([recipe])) as archive:
         paprika = strict_json(gzip.decompress(archive.read(archive.namelist()[0])))
     [note] = MarkdownExporter().export([recipe])

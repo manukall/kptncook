@@ -1,16 +1,23 @@
-"""Real offline download and publication paths share cumulative allowances."""
+"""Exercise download and publication limits offline."""
 
+import json
 import zipfile
+from datetime import date
+from io import BytesIO
 
 import httpx
 import pytest
+from typer.testing import CliRunner
 
 from kptncook import exporter_utils, image_download
+from kptncook.cli import app
 from kptncook.config import get_settings
 from kptncook.http_errors import UserFacingError
 from kptncook.markdown_exporter import MarkdownExporter
 from kptncook.models import Recipe
 from kptncook.paprika import PaprikaExporter
+from kptncook.repositories import RecipeInDb
+from kptncook.services.repository import save_recipe_entries
 from kptncook.tandoor import TandoorExporter
 
 
@@ -92,13 +99,10 @@ def test_cumulative_assets_stop_with_receipts(batch, tmp_path, monkeypatch, kind
     assert error.failed_recipe_id == "synthetic-1"
     assert error.remaining_count == 3
     assert error.uncertain_paths == ()
-    if kind == "paprika":
+    if kind in {"paprika", "tandoor"}:
         assert error.completed_paths == ()
         assert error.unpublished_count == 5
         assert list(out.iterdir()) == [sentinel]
-    elif kind == "tandoor":
-        assert error.completed_paths == (out / "Recipe_0.zip",)
-        assert sorted(out.iterdir()) == sorted([sentinel, *error.completed_paths])
     else:
         md = get_settings().root / "export_md"
         assert error.completed_paths == (md / "Recipe 0.md",)
@@ -140,7 +144,7 @@ def test_output_allowance_refuses_before_partial_final(
 
 
 @pytest.mark.parametrize("kind", ["tandoor", "markdown"])
-def test_cumulative_output_retains_first_receipt(batch, tmp_path, monkeypatch, kind):
+def test_cumulative_output_reports_published_files(batch, tmp_path, monkeypatch, kind):
     # Measure the actual writes of one real export, then allow exactly that work
     # for a multi-recipe batch. Compression/header sizes are platform-dependent.
     for recipe in batch:
@@ -167,15 +171,65 @@ def test_cumulative_output_retains_first_receipt(batch, tmp_path, monkeypatch, k
     with pytest.raises(UserFacingError, match="output.*allowance") as caught:
         cls().export(batch)
     error = caught.value
-    assert error.failed_recipe_id == "synthetic-1"
-    assert error.remaining_count == 3
-    assert error.unpublished_count == 4
-    assert len(error.completed_paths) == 1
-    assert error.completed_paths[0].is_file()
+    if kind == "tandoor":
+        assert error.failed_recipe_id in {r.id.oid for r in batch} | {"archive"}
+        assert error.unpublished_count == len(batch)
+        assert error.completed_paths == ()
+    else:
+        assert error.failed_recipe_id == "synthetic-1"
+        assert error.remaining_count == 3
+        assert error.unpublished_count == 4
+        assert len(error.completed_paths) == 1
+        assert error.completed_paths[0].is_file()
     assert error.uncertain_paths == ()
     assert error.retained_assets == ()
     directory = out if kind == "tandoor" else out / "export_md"
     assert list(directory.iterdir()) == list(error.completed_paths)
+
+
+def test_tandoor_large_store_uses_final_zip_size(minimal, monkeypatch, tmp_path):
+    ids = [f"{i:024x}" for i in range(500)]
+    description = "Synthetic recipe text. " * 300
+    save_recipe_entries(
+        [
+            RecipeInDb(
+                date=date.today(),
+                data=dict(
+                    minimal,
+                    _id={"$oid": oid},
+                    imageList=[],
+                    authorComment={"de": description},
+                ),
+            )
+            for oid in ids
+        ]
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    command = ["export-recipes-to-tandoor"]
+    monkeypatch.setattr(exporter_utils, "MAX_BATCH_OUTPUT_BYTES", 1)
+    result = runner.invoke(app, [*command, "--budget-mib", "1"])
+    assert result.exit_code == 0, result.output
+    [path] = tmp_path.glob("*.zip")
+    size = path.stat().st_size
+    assert size < 1024**2 < len(ids) * len(description)
+    with zipfile.ZipFile(path) as outer:
+        assert len(outer.namelist()) == len(ids)
+        for i, oid in enumerate(ids, 1):
+            with zipfile.ZipFile(BytesIO(outer.read(f"{i}-{oid}.zip"))) as inner:
+                data = json.loads(inner.read("recipe.json"))
+                assert data["description"] == description
+                assert data["source_url"].endswith(oid)
+    monkeypatch.setattr(exporter_utils, "MAX_BATCH_OUTPUT_BYTES", size - 1)
+    refused = runner.invoke(app, command)
+    assert refused.exit_code == 1
+    assert "--budget-mib" in refused.output
+    assert "Unpublished recipes: 500" in refused.output
+    assert list(tmp_path.glob("*.zip")) == [path]
+    assert not list(tmp_path.glob(".kptncook-*"))
+    monkeypatch.setattr(exporter_utils, "MAX_BATCH_OUTPUT_BYTES", size)
+    assert runner.invoke(app, command).exit_code == 0
+    assert [p.stat().st_size for p in tmp_path.glob("*.zip")] == [size, size]
 
 
 def test_paprika_charges_archive_member_growth(batch, tmp_path, monkeypatch):

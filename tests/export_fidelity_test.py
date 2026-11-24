@@ -9,6 +9,7 @@ from zipfile import ZipFile
 import pytest
 import yaml
 
+from tandoor_archive import open_tandoor_recipe
 from kptncook.markdown_exporter import MarkdownExporter
 from kptncook.mealie import kptncook_to_mealie
 from kptncook.models import Image, Recipe
@@ -72,7 +73,7 @@ def read_export(kind, result):
         with ZipFile(result.filename) as archive:
             return json.loads(gzip.decompress(archive.read(archive.namelist()[0])))
     if kind == "tandoor":
-        with ZipFile(result.filenames[0]) as archive:
+        with open_tandoor_recipe(result.filenames[0]) as archive:
             return json.loads(archive.read("recipe.json"))
     return yaml.safe_load(
         Path(result.filenames[0]).read_text(encoding="utf-8").split("---", 2)[1]
@@ -199,10 +200,10 @@ def test_exported_portions_scale_single_serving_quantities(
         assert payload["ingredients"] == f"{amount} g Flour\n"
     else:
         [filename] = TandoorExporter().export([recipe])
-        with ZipFile(filename) as archive:
+        with open_tandoor_recipe(filename) as archive:
             payload = json.loads(archive.read("recipe.json"))
         assert payload["servings"] == expected
-        assert payload["ingredients"][0]["amount"] == amount
+        assert payload["steps"][0]["ingredients"][0]["amount"] == amount
 
 
 def test_markdown_frontmatter_roundtrips_strings(synthetic_recipe, monkeypatch):

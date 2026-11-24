@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from kptncook import image_download
+from tandoor_archive import open_tandoor_recipe
 from kptncook.markdown_exporter import MarkdownExporter
 from kptncook.mealie import MealieApiClient, RecipeStep, RecipeWithImage
 from kptncook.models import Image, Recipe
@@ -129,7 +130,7 @@ def test_bounded_image_preserves_recipe(
         assert bool(payload["photo_data"]) == has_image
     elif caller == "tandoor":
         filename = TandoorExporter().export_recipe(recipe)
-        with ZipFile(filename) as archive:
+        with open_tandoor_recipe(filename) as archive:
             payload = json.loads(archive.read("recipe.json"))
             assert ("image.jpg" in archive.namelist()) == has_image
         assert payload["steps"][0]["instruction"] == "Mix synthetic ingredients"

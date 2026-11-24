@@ -217,23 +217,29 @@ class ExportLimitError(UserFacingError):
 class ExportBudget:
     """Count downloaded assets and output work before retaining/writing bytes."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, asset_limit: int | None = None, output_limit: int | None = None
+    ) -> None:
+        self.asset_limit = MAX_BATCH_ASSET_BYTES if asset_limit is None else asset_limit
+        self.output_limit = (
+            MAX_BATCH_OUTPUT_BYTES if output_limit is None else output_limit
+        )
         self.asset_bytes = 0
         self.output_bytes = 0
 
     def charge_asset(self, amount: int) -> None:
-        if self.asset_bytes + amount > MAX_BATCH_ASSET_BYTES:
+        if self.asset_bytes + amount > self.asset_limit:
             raise ExportLimitError(
                 "Batch asset byte allowance exceeded. Export a smaller selection."
             )
         self.asset_bytes += amount
 
     def check_asset_capacity(self) -> None:
-        if self.asset_bytes >= MAX_BATCH_ASSET_BYTES:
+        if self.asset_bytes >= self.asset_limit:
             self.charge_asset(1)
 
     def charge_output(self, amount: int) -> None:
-        if self.output_bytes + amount > MAX_BATCH_OUTPUT_BYTES:
+        if self.output_bytes + amount > self.output_limit:
             raise ExportLimitError(
                 "Batch output byte allowance exceeded. Export a smaller selection."
             )
@@ -309,7 +315,7 @@ class BatchExportError(UserFacingError):
             and not isinstance(cause, ExportPublicationUncertain)
             else type(cause).__name__
         )
-        lines = [f"Export stopped at recipe {failed_recipe_id}: {reason}."]
+        lines = [f"Export stopped at recipe {failed_recipe_id}: {reason.rstrip('.')}."]
         for label, paths in (
             ("Completed export", self.completed_paths),
             ("Completed asset", self.completed_assets),
@@ -364,6 +370,49 @@ def move_to_free_target(
     and extension; identity/counter suffixes remain intact.
     """
     directory = Path(directory)
+    # Copy first: the source may be on a different filesystem. Only the sibling
+    # staging inode is linked, so publication itself is atomic and no-clobber.
+    staging_path: Path | None = None
+    try:
+        with open(source, "rb") as src:
+            with tempfile.NamedTemporaryFile(
+                dir=directory, prefix=".kptncook-", suffix=".tmp", delete=False
+            ) as staged:
+                staging_path = Path(staged.name)
+                shutil.copyfileobj(
+                    src, BudgetedWriter(staged, budget) if budget else staged
+                )
+                staged.flush()
+                os.fsync(staged.fileno())
+        target = publish_staged_export(
+            staging_path, directory, stem, extension, disambiguator
+        )
+        # Publication succeeded. Cleanup errors must not make callers undo
+        # assets referenced by an already published Markdown note.
+        try:
+            Path(source).unlink()
+        except OSError:
+            with suppress(Exception):
+                logger.warning("Export published; could not remove staging source")
+        return target
+    finally:
+        if staging_path is not None:
+            try:
+                staging_path.unlink(missing_ok=True)
+            except OSError:
+                # Preserve the publication result or original exception.
+                with suppress(Exception):
+                    logger.warning("Could not remove export staging file")
+
+
+def publish_staged_export(
+    staging_path: Path,
+    directory: Path,
+    stem: str,
+    extension: str,
+    disambiguator: str | None = None,
+) -> Path:
+    """Link an owned, fsynced file on the destination filesystem to a free name."""
     base_suffix = f"-{disambiguator}" if disambiguator else ""
     sequential = itertools.islice(
         itertools.chain(
@@ -380,59 +429,30 @@ def move_to_free_target(
             for _ in range(MAX_RANDOM_EXPORT_ATTEMPTS)
         ),
     )
-    # Copy first: the source may be on a different filesystem. Only the sibling
-    # staging inode is linked, so publication itself is atomic and no-clobber.
-    staging_path: Path | None = None
-    try:
-        with open(source, "rb") as src:
-            with tempfile.NamedTemporaryFile(
-                dir=directory, prefix=".kptncook-", suffix=".tmp", delete=False
-            ) as staged:
-                staging_path = Path(staged.name)
-                shutil.copyfileobj(
-                    src, BudgetedWriter(staged, budget) if budget else staged
-                )
-                staged.flush()
-                os.fsync(staged.fileno())
-        for suffix in suffixes:
-            target = directory / bounded_export_filename(stem, extension, suffix=suffix)
-            try:
-                link = getattr(os, "link", None)
-                if link is None:
-                    raise NotImplementedError("os.link is unavailable")
-                link(staging_path, target)
-            except FileExistsError:
-                continue
-            except NotImplementedError as exc:
-                raise _hard_links_unsupported(directory, str(exc)) from exc
-            except OSError as exc:
-                if exc.errno in _LINK_UNSUPPORTED_ERRNOS:
-                    raise _hard_links_unsupported(
-                        directory, exc.strerror or str(exc)
-                    ) from exc
-                raise UserFacingError(
-                    f"Could not publish the export as {target}: {exc.strerror or exc}."
+    for suffix in suffixes:
+        target = directory / bounded_export_filename(stem, extension, suffix=suffix)
+        try:
+            link = getattr(os, "link", None)
+            if link is None:
+                raise NotImplementedError("os.link is unavailable")
+            link(staging_path, target)
+        except FileExistsError:
+            continue
+        except NotImplementedError as exc:
+            raise _hard_links_unsupported(directory, str(exc)) from exc
+        except OSError as exc:
+            if exc.errno in _LINK_UNSUPPORTED_ERRNOS:
+                raise _hard_links_unsupported(
+                    directory, exc.strerror or str(exc)
                 ) from exc
-            try:
-                fsync_directory(directory)
-            except BaseException as exc:
-                raise ExportPublicationUncertain(target) from exc
-            # Publication succeeded. Cleanup errors must not make callers undo
-            # assets referenced by an already published Markdown note.
-            try:
-                Path(source).unlink()
-            except OSError:
-                with suppress(Exception):
-                    logger.warning("Export published; could not remove staging source")
-            return target
-    finally:
-        if staging_path is not None:
-            try:
-                staging_path.unlink(missing_ok=True)
-            except OSError:
-                # Preserve the publication result or original exception.
-                with suppress(Exception):
-                    logger.warning("Could not remove export staging file")
+            raise UserFacingError(
+                f"Could not publish the export as {target}: {exc.strerror or exc}."
+            ) from exc
+        try:
+            fsync_directory(directory)
+        except BaseException as exc:
+            raise ExportPublicationUncertain(target) from exc
+        return target
     raise UserFacingError(
         f"Export filename collision limit reached in {directory}. "
         "Move existing exports or choose a different export location before retrying."

@@ -4,6 +4,7 @@ import zipfile
 
 import httpx
 
+from tandoor_archive import open_tandoor_recipe
 from kptncook.models import Recipe
 from kptncook.tandoor import TandoorExporter
 
@@ -28,7 +29,7 @@ def test_export_recipe_writes_zip_with_image(
 
     zip_path = tmp_path / filename
     assert zip_path.is_file()
-    with zipfile.ZipFile(zip_path) as zip_file:
+    with open_tandoor_recipe(zip_path) as zip_file:
         assert set(zip_file.namelist()) == {"recipe.json", "image.jpg"}
         payload = json.loads(zip_file.read("recipe.json").decode("utf-8"))
     assert payload["name"] == recipe.localized_title.de
@@ -76,7 +77,7 @@ def test_export_recipe_skips_missing_cover_image(
 
     zip_path = tmp_path / filename
     assert zip_path.is_file()
-    with zipfile.ZipFile(zip_path) as zip_file:
+    with open_tandoor_recipe(zip_path) as zip_file:
         assert "recipe.json" in zip_file.namelist()
         assert "image.jpg" not in zip_file.namelist()
 
@@ -95,7 +96,7 @@ def test_export_recipe_skips_when_no_cover_image(
 
     zip_path = tmp_path / filename
     assert zip_path.is_file()
-    with zipfile.ZipFile(zip_path) as zip_file:
+    with open_tandoor_recipe(zip_path) as zip_file:
         assert "recipe.json" in zip_file.namelist()
         assert "image.jpg" not in zip_file.namelist()
     httpx_get.assert_not_called()
@@ -157,7 +158,7 @@ def test_export_deduplicates_exact_keyword_names_in_first_seen_order(
 
     (filename,) = TandoorExporter().export([recipe])
 
-    with zipfile.ZipFile(tmp_path / filename) as archive:
+    with open_tandoor_recipe(tmp_path / filename) as archive:
         payload = json.loads(archive.read("recipe.json"))
     assert payload["keywords"] == [
         {"name": "kptncook"},
@@ -240,7 +241,7 @@ def test_export_expands_timer_placeholders(minimal, mocker, tmp_path, monkeypatc
 
     filename = exporter.export_recipe(recipe=recipe)
 
-    with zipfile.ZipFile(tmp_path / filename) as zip_file:
+    with open_tandoor_recipe(tmp_path / filename) as zip_file:
         payload = json.loads(zip_file.read("recipe.json").decode("utf-8"))
     instruction = payload["steps"][0]["instruction"]
     assert "15 Min." in instruction
@@ -263,15 +264,15 @@ def test_export_keeps_same_titled_recipes_apart(minimal, tmp_path, monkeypatch):
 
     filenames = TandoorExporter().export([first, second])
 
-    assert filenames == [
-        "Synthetic_Soup.zip",
-        "Synthetic_Soup-bbbbbbbbbbbbbbbbbbbbbbbb.zip",
-    ]
+    assert filenames == ["kptncook-tandoor-export.zip"]
+    path = tmp_path / filenames[0]
+    with zipfile.ZipFile(path) as outer:
+        members = outer.namelist()
+    assert members == [f"1-{first.id.oid}.zip", f"2-{second.id.oid}.zip"]
     sources = []
-    for filename in filenames:
-        with zipfile.ZipFile(tmp_path / filename) as zip_file:
-            payload = json.loads(zip_file.read("recipe.json").decode("utf-8"))
-        sources.append(payload["source_url"])
+    for member in members:
+        with open_tandoor_recipe(path, member) as inner:
+            sources.append(json.loads(inner.read("recipe.json"))["source_url"])
     assert len(set(sources)) == 2
     zips = sorted(p.name for p in tmp_path.glob("*.zip"))
     assert zips == sorted(filenames)
@@ -290,18 +291,20 @@ def test_export_reports_published_zip_after_temp_cleanup_fault(
         cleanup(directory)
         scratch_paths.append(directory.name)
         if len(scratch_paths) == 1:
-            assert (tmp_path / "Synthetic_Soup.zip").is_file()
+            assert (tmp_path / "kptncook-tandoor-export.zip").is_file()
             raise PermissionError("synthetic scratch cleanup fault")
 
     monkeypatch.setattr(tempfile.TemporaryDirectory, "cleanup", fail_first_cleanup)
 
     filenames = TandoorExporter().export([first, second])
 
-    assert filenames == ["Synthetic_Soup.zip", "Synthetic_Stew.zip"]
-    for filename in filenames:
-        with zipfile.ZipFile(tmp_path / filename) as archive:
-            assert json.loads(archive.read("recipe.json"))["name"].startswith(
-                "Synthetic "
+    assert filenames == ["kptncook-tandoor-export.zip"]
+    path = tmp_path / filenames[0]
+    for index, recipe in enumerate((first, second), 1):
+        with open_tandoor_recipe(path, f"{index}-{recipe.id.oid}.zip") as inner:
+            assert (
+                json.loads(inner.read("recipe.json"))["name"]
+                == recipe.localized_title.de
             )
     assert "Could not clean up Tandoor staging directory" in caplog.text
     assert scratch_paths[0] in caplog.text
